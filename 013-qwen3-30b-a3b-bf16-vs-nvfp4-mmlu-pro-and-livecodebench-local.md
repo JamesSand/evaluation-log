@@ -92,6 +92,26 @@ NVFP4 同命令改 `--model_name_or_path qwen3-30b-a3b-nvfp4` + `--base_url .../
 | MMLU-Pro（本文 Part 1，full 12032） | 0.7794 | 0.7616 | −1.8 分 |
 | LiveCodeBench（本文 Part 2，279） | 0.6344 | 0.6093 | −2.5 分 |
 
+
+### 与 NVIDIA model card 报告数字的对照（"AA Ref" 是什么）
+
+[nvidia/Qwen3-30B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3-30B-A3B-NVFP4) 的 model card 报告：
+
+| Precision | MMLU Pro | GPQA Diamond | HLE | LiveCodeBench | SciCode | MATH-500 | AIME 2024 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| BF16 (AA Ref) | 0.78 | 0.62 | 0.07 | 0.51 | 0.28 | 0.96 | 0.75 |
+| FP4 | 0.77 | 0.61 | 0.05 | **0.65** | 0.32 | 0.96 | **0.80** |
+
+- **"AA Ref" = Artificial Analysis Reference**：BF16 基线行不是 NVIDIA 自己跑的，而是直接引用第三方评测机构
+  [Artificial Analysis](https://artificialanalysis.ai/evaluations/artificial-analysis-intelligence-index) 排行榜上原版
+  Qwen3-30B-A3B 的公开分数（那组 benchmark 列——含 HLE、SciCode——正是 AA Intelligence Index 的评测套件）。
+  FP4 行才是 NVIDIA 自己测的（TensorRT-LLM + B200，见 card 的 Inference 一节）。
+- **因此该表是跨 harness 对比，不能用来读量化损失**：FP4 比 BF16"高 14 分的 LiveCodeBench"（0.65 vs 0.51）和
+  "高 5 分的 AIME"是 harness/题目版本/采样设置不同造成的伪影——量化不会让模型变强。LCB 对题目时间窗尤其敏感。
+- **交叉验证我们自己的口径**：我们同 harness 测的 BF16（MMLU-Pro 0.7794、GPQA 0.6195）与 AA Ref（0.78、0.62）
+  几乎完全一致，说明本文与 005 的 harness 和 AA 口径对齐；而本文的量化损失（同 harness 的 −1.8/−3.7/−2.5）
+  才是干净的量化损失读数。
+
 **结论：Qwen3-30B-A3B 的官方 NVFP4 量化在推理/知识/代码三个维度上损失稳定落在 2–4 分，MoE 架构对 4-bit 量化明显比同量级 dense 模型鲁棒。**
 
 ## 运维备注（踩坑）
