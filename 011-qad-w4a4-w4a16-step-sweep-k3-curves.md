@@ -31,7 +31,7 @@ w4a16-kv16 家族：
 
 ![K3 KL vs QAD training step (w4a16)](k3-vs-step-qad-w4a16.png)
 
-两家族对比：
+### 两家族对比：
 
 ![QAD families compared](k3-vs-step-qad-families.png)
 
