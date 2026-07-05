@@ -110,3 +110,25 @@
 - **8B NVFP4 需要显式 `--quantization modelopt_fp4`**（008 记录的坑）；D 臂 KV dtype 必须显式 bf16。
 - **turboeval 并发限额**（6 running jobs/账号）：与 veomni 等他人 job 错峰，或分批提交。
 - 任何反直觉结果（例如 fake-quant 比 BF16 还高分）→ 先跑 5 题人工检查输出，再查实现，不直接采信。
+
+## 8. 追加计划（2026-07-05）：30B turboeval 补齐 + 64K/128K 长上下文扩展
+
+执行顺序硬约束：**8.1 先跑完，8.2 排在它后面。**
+
+### 8.1 30B turboeval 严格对比补齐（优先）
+
+- **背景**：30B 首轮 D 臂 GPQA 因 fused-path bug 作废（修复与验证见 014 §1）；重跑先后被 turboeval 日限额（200/day，等 9 小时未恢复）和 **gate 隧道失效**挡住——2026-07-05 限额解除后第一次重跑，3 个 GPQA job 的 1980 个 trial 全部 err，根因是 turboeval 服务端变更后三条 turbogate 隧道全部 403（旧注册失效），请求根本没到模型。教训入 014 §6：**每次提交前必过 gate `/v1/models`==200 自检**（服务器本地 health 通 ≠ gate 通）。
+- **内容**：重建隧道后重跑 ① GPQA D 臂（thinking，198 题 × 3 runs）；② RULER 三臂 8K/32K 两波 78 job（nonthink，13 任务 × 50 例，协议同 §4.2）。
+- **提交前两道自检**：gate 200；D 臂服务器日志出现 `KV_FAKEQUANT first call`。
+- **产出**：以 turboeval 正式数字覆盖/确认 014 §4 的本地 harness 数字（本地数据降级为跨 harness 交叉验证注脚），使 30B 与 8B/4B 严格同 harness 可比。
+
+### 8.2 长上下文 RULER 扩展：4B/8B/30B × 64K/128K（排在 8.1 之后）
+
+- **范围**：{Qwen3-4B, 8B, 30B-A3B} × 三臂 A/D/E × 13 任务 × 50 例 × {65536, 131072}，共 234 个测量点（约 234 个 turboeval job）。GPQA 不加长档（短上下文任务，已证零/低代价）。
+- **serving 前提（关键）**：Qwen3 系原生 max_position=40960，64K/128K 都必须开 **YaRN rope-scaling**。统一用官方配方 `factor=4`（扩到 131072）：
+  `--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}' --context-length 133120`
+  64K 与 128K 共用同一 serving 配置（两档间可比）；三臂同配置（臂间差值不受 YaRN 影响）。
+- **协议隔离**：YaRN 静态缩放对模型行为有全局影响 → 64K/128K 自成一个 protocol 块，**不与 8K/32K（原生 rope）的表混排**；曲线解读用 D−E 的四点斜率（8K→32K→64K→128K），跨 rope 配置处标注断点。
+- **显存与并发**：128K 单序列 KV（BF16）约 8B 36GB / 4B 19GB / 30B 12GB；A/D 臂 BF16-KV 并发低（8B@128K 约 2–3 条），E 臂 FP8-KV 减半。turboeval `concurrency` 下调：64K 用 8、128K 用 4，避免 KV 池打满触发 retract 抖动。跑法逐模型串行（每模型三臂并行占 3 张 B200）：**30B → 8B → 4B**。
+- **harness**：turboeval（`max_seq_lengths=[65536]/[131072]`，tokenizer Qwen/Qwen3-8B）；若 turboeval 超长档有问题，fallback 本地官方 RULER（数据生成栈已就绪，014 §6，仅需以 131072 重新生成数据）。
+- **预期读数与决策价值**：验证"KV-FP4 边际代价随上下文放大"在 YaRN 区间是否继续恶化（30B 已见 32K −9pp）；重点看 cwe / niah_multikey 是否进一步崩塌。这条曲线直接决定 Phase 1 KV-QAT 的训练长度配比与收益上限估计。
