@@ -68,12 +68,13 @@
 | 臂 | run1 / run2 / run3 | 均值 |
 | --- | --- | --- |
 | A（BF16 全链路） | 0.6010 / 0.5859 / 0.6566 | **0.6145** |
-| D（w4a4 + FP4-KV） | （turboeval 无有效数据，本地复现见 §4.1.1） | — |
+| D（w4a4 + FP4-KV，修复后 07-05 重跑） | 0.5354 / 0.5303 / 0.5303 | **0.5320** |
 | E（w4a4 + FP8-KV，生产现状） | 0.5707 / 0.6111 / 0.5758 | **0.5859** |
 
-> ⚠️ **首轮 D 臂 3 个 run（0.5657/0.5606/0.6162，均值 0.5808）作废**：跑的时候 fused-path bug（见 §1）导致 fake-quant 未生效，实际测的是 w4a4 + BF16-KV。作废数据本身仍有参考价值：它是 30B 的"w4a4 + BF16-KV"读数，与 E（FP8-KV）0.5859 相差 −0.5pp（噪声内），说明 **FP8-KV vs BF16-KV 对 30B GPQA 无损**。
+读数（turboeval 正式）：**D−E = −5.4pp**；E−A = −2.9pp（与 005 的 −3.7pp 交叉吻合）；D−A = −8.3pp。全部 0 错误、提交前过 gate-200 + hook first-call 双自检。
+注意 D−E 与本地 evalscope 复现（§4.1.1，D−E = 0.0pp）**跨 harness 不一致**，两个候选解释：① E 臂 3-run 方差大（0.571–0.611，极差 4pp）而 D 臂极稳（0.530–0.535），−5.4pp 里有相当一部分可能是 E 的向上波动；② turboeval 是 \boxed 抽取 + 长 thinking 自由生成（KV 误差在数千 token 的思维链上累积、且退化模型更易破坏格式），evalscope 是 MCQ "ANSWER: X" 抽取（更宽容）——两者测的"GPQA 能力"并不完全同一。**保守解读：30B GPQA 的 KV-FP4 边际代价在 0 到 −5pp 之间，敏感度低于 RULER 长上下文。**
 
-读数（turboeval 部分）：E−A = −2.9pp（与 005 的 −3.7pp 交叉吻合）。D 臂重跑被 turboeval **日提交限额 200** 卡死（当日配额耗尽），改用本地 harness 复现，见 §4.1.1。
+> ⚠️ **首轮 D 臂 3 个 run（0.5657/0.5606/0.6162，均值 0.5808）作废**：跑的时候 fused-path bug（见 §1）导致 fake-quant 未生效，实际测的是 w4a4 + BF16-KV。作废数据本身仍有参考价值：它是 30B 的"w4a4 + BF16-KV"读数，与 E（FP8-KV）0.5859 相差 −0.5pp（噪声内），说明 **FP8-KV vs BF16-KV 对 30B GPQA 无损**。
 
 #### 4.1.1 本地复现（evalscope 0-shot MCQ；harness 不同，分数只做臂间比较，不与上表混排）
 
@@ -87,7 +88,22 @@ D 臂重跑改用本地 evalscope（`gpqa_diamond`，198 题 × repeats 3 = 594 
 
 读数：**D−E = 0.0pp——30B 在 GPQA 上 KV 从 FP8 压到 FP4 零边际代价**（与作废数据推出的"KV 格式对 30B GPQA 不敏感"互相印证）；E−A = −2.2pp（turboeval 口径 −2.9pp，同量级）。A/E 两臂跨 harness 偏差 ≤0.5pp，本地复现协议可信。
 
-### 4.2 RULER（本地复现：官方 NVIDIA RULER 数据 + 官方 evaluate.py）
+### 4.2 RULER
+
+#### 4.2.0 turboeval 正式结果（2026-07-05 补齐，与 §2/§3 严格同 harness）
+
+隧道加固后重跑（见 §6 事故记录），78/78 job 全部 completed、全部 0 trial 错误。12 任务均值（去 vt，口径同 §2/§3）：
+
+| 均值 | A | D | E | **D−E** | E−A |
+| --- | --- | --- | --- | --- | --- |
+| @8K | 90.75 | 89.77 | 90.76 | **−1.0pp** | 0.0 |
+| @32K | 87.44 | 78.83 | 85.42 | **−6.6pp** | −2.0pp |
+
+- 重灾任务 @32K（D−E）：`niah_multikey_3` **−20pp**、`ruler_qa_squad` −17.8pp、`ruler_cwe` −9.0pp。
+- 与本地官方 RULER（§4.2.1）方向与量级一致（本地 D−E @32K = −9.3pp，略更悲观），**两个独立 harness 双重确认"KV-FP4 代价随上下文急剧放大"**；重灾任务重合（multikey_3 两边都 −20pp、cwe 两边都重伤）。
+- 跨模型同表比较（严格同 harness）：D−E @32K 为 8B −2.0pp / 4B −2.5pp / **30B −6.6pp**——30B 的 KV-FP4 敏感度确认显著高于 dense 小模型。
+
+#### 4.2.1 本地复现（官方 NVIDIA RULER 数据 + 官方 evaluate.py；先于 turboeval 补齐完成，留作交叉验证）
 
 turboeval 配额卡死后改本地栈：**官方 RULER 仓库**（clone 至 `low-precision-project/RULER`，唯一代码改动是 evaluate.py 的 nemo 依赖兜底，git diff 可查）生成数据（13 任务 × 8K/32K × 50 条，Qwen3 tokenizer，seed 42，三臂共用同一份数据），自写轻量 OpenAI 客户端打本地 sglang 端口（nonthink 模板 + `temperature=0.7, top_p=0.8, top_k=20, min_p=0` 服务器端 pin，协议同 turboeval 口径），**官方 evaluate.py** 评分。全部 3900 条预测 0 请求错误、0 空输出；开跑前同样过 D 臂 fake-quant 活性自检。与 turboeval 仅有的 2 个有效 job（A 臂 niah_single_1/2@8K = 1.0）交叉一致（本地同为 100.0）。
 
@@ -114,12 +130,12 @@ turboeval 配额卡死后改本地栈：**官方 RULER 仓库**（clone 至 `low
 | --- | --- | --- | --- | --- |
 | Qwen3-8B | −3.7pp | −0.7pp | −2.0pp | turboeval，12 任务口径 |
 | Qwen3-4B | ≈0 | −0.6pp | −2.5pp | turboeval;E 臂为 BF16-KV |
-| Qwen3-30B-A3B | **0.0pp** | −1.3～−2.2pp | **−8.7～−9.3pp** | 本地 harness（evalscope + 官方 RULER） |
+| Qwen3-30B-A3B | **−5.4pp**（本地 MCQ 口径 0.0，保守取 0～−5pp 区间） | −1.0pp | **−6.6pp** | **turboeval（严格同 harness，07-05 补齐）**；本地 harness 交叉验证 @32K 为 −9.3pp，方向量级一致 |
 
 **对照 004 §6 决策门：**
 
-1. **D−E @32K RULER ≥3pp 的门被 30B 决定性触发**（−9pp），8B/4B 在 2–2.5pp 的门槛边缘 → **Phase 1 KV-QAT 必要且收益明确，且优先级最高的目标模型是 30B-A3B（MoE/少 KV head）**。
-2. **"GPQA 掉点小、RULER 32K 掉点大"的模式在三个模型上全部成立**（30B 最极端：GPQA 零代价 vs 32K −9pp）→ 主战场在长上下文，**Phase 1 的训练与评测重心应放 RULER 32K–128K**,短上下文能力基本免费。
+1. **D−E @32K RULER ≥3pp 的门被 30B 决定性触发**（turboeval −6.6pp / 本地 −9.3pp 双 harness 确认），8B/4B 在 2–2.5pp 的门槛边缘 → **Phase 1 KV-QAT 必要且收益明确，且优先级最高的目标模型是 30B-A3B（MoE/少 KV head）**。
+2. **"短上下文掉点小、RULER 32K 掉点大"的模式在三个模型上全部成立**（30B：8K −1.0pp vs 32K −6.6pp）→ 主战场在长上下文，**Phase 1 的训练与评测重心应放 RULER 32K–128K**,短上下文能力基本免费（30B GPQA 的跨 harness 分歧见 §4.1，保守区间 0～−5pp,仍小于长上下文档）。
 3. 敏感任务收敛一致（cwe、niah_multikey 系）→ KV-QAT 训练数据/评测应重点覆盖多 key 检索与词频聚合类长上下文任务。
 4. **未决风险（已记录、本轮未消解）**：nvidia checkpoint 的 k/v_scale=1.0 是未标定占位值，本轮 s_global=1/6 直接继承该口径。若真标定（per-layer amax 校准）能显著收窄 D−E,则部分损失可用"校准"而非"QAT"收回——**上 QAT 前应先做这个便宜的 ablation**（scales 目录里 calib 产物已备好）。
 
@@ -132,6 +148,7 @@ turboeval 配额卡死后改本地栈：**官方 RULER 仓库**（clone 至 `low
 - 两次 kill 自匹配事故（pgrep/pkill 模式匹配到自身命令行）→ 全部改为 `$!` 精确 PID 生命周期管理（`d2_model.sh`）。
 - fake-quant 挂载点只覆盖 `MHATokenToKVPool`（bf16/fp16 KV 时激活）；E 臂 fp8 KV 走 fused 写入路径不受影响（by design）。
 - **验证 hook 活性的教训（30B fused-path 事故）**：只看"服务器起得来、eval 出分数"完全不够——必须做**贪心分叉探针**（同 prompt 贪心解码，base vs fake-quant 序列必须分叉）+ **K3 显著高于噪声底** 两道检查。30B 首轮 GPQA D 臂就是漏了这两道检查直接跑分，白烧 3 个 job。不同模型实现可能走不同 KV 写入路径（dense vs MoE 就不同），**每换一个模型都要重新验 hook**。
-- turboeval **日提交限额 200**：三臂 × 13 任务 × 2 长度的 RULER 一个模型就吃 78 个 job，加 GPQA smoke+3run 15 个，两个模型一天就撞墙。30B 的 RULER 因此被 429 挡住(等了 9+ 小时未恢复,疑似滚动 24h 窗口)。
+- turboeval **日提交限额 200**：三臂 × 13 任务 × 2 长度的 RULER 一个模型就吃 78 个 job，加 GPQA smoke+3run 15 个，两个模型一天就撞墙。30B 的 RULER 因此被 429 挡住(等了 9+ 小时未恢复;07-05 服务端解除该限制)。
+- **turbogate 隧道两连坑（07-05，共烧掉一轮 GPQA 3 job + 半轮 RULER）**：① 服务端维护后旧子域名被 **admin 回收**（`subdomain revoked by admin`），gate 全 403 但本地 health 正常——**提交前必须 curl gate `/v1/models` 验 200**，本地自检不够；② 换新子域名后，D 臂高负载时段隧道**每 40s 被服务端踢线重连**（默认 frpc 配置无心跳/池参数），job 表现为 `gateway recorded N/M request errors` + 完成 trial 全 0 分。修复：绕开 turbogate wrapper 直接跑 frpc,配置加固（`heartbeatInterval=10, heartbeatTimeout=120, poolCount=8, tcpMuxKeepaliveInterval=10`），并用 64 请求 × 强制 1500 token × 16 并发的持续压测（0 错误 0 重连）验收后才放行正式提交。加固后 8.1 全程 78+3 job 0 错误。
 - **本地复现栈（零 turboeval 配额，本次 30B 全量数据来源）**：GPQA 用 evalscope 1.8.1（`gpqa_diamond`，ModelScope 数据源）；RULER 用官方 NVIDIA 仓库生成数据 + 自写 32 并发 OpenAI 客户端 + 官方 evaluate.py。速度远快于 turboeval（GPQA 三臂 594×3 次生成约 1 小时,RULER 三臂 3900 条预测约 25 分钟,4×B200 本地）。跨 harness 校验：GPQA 的 A/E 臂与 turboeval 偏差 ≤0.5pp;RULER 与 turboeval 仅有的 2 个有效 job 完全一致。局限：绝对分数不能与 turboeval 表混排（prompt/抽取逻辑不同），只做臂间差值解读。
 - 本地 RULER 数据生成的坑（详见 RULER 仓库 git log/diff）：english_words.json 是 git-lfs pointer（机器无 git-lfs，需手动从 LFS API 取回，否则 **cwe 任务静默生成失败**）；HotpotQA 的 CMU 官方源已挂（用脚本内置的 HF 镜像）；prepare.py 会吞子进程错误恒报成功，**产物必须按行数硬验**。
